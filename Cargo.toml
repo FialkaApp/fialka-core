@@ -33,6 +33,9 @@ hkdf               = "0.12"
 sha2               = "0.10"
 sha3               = "0.10"
 
+# HMAC — explicit dep for manual HKDF implementation (matches Kotlin byte-for-byte)
+hmac               = "0.12"
+
 # Utilities
 zeroize            = { version = "1.8", features = ["derive"] }
 rand               = "0.8"
