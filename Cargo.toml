@@ -44,5 +44,8 @@ base64             = "0.22"
 bs58               = "0.5"
 bip39              = "2.0"
 
+[dependencies.hex]
+version  = "0.4"
+optional = false
+
 [dev-dependencies]
-hex   = "0.4"

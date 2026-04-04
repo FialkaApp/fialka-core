@@ -171,3 +171,6 @@ pub fn derive_pqxdh_root_key(ss_classic: &[u8; 32], ss_pq: &[u8; 32]) -> Zeroizi
 // ── Zeroize ──────────────────────────────────────────────────────────────────
 
 use zeroize::Zeroize;
+
+pub mod state;
+pub use state::RatchetState;
