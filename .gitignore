@@ -1,0 +1,18 @@
+# Rust build artifacts
+target/
+
+# Compiled native libs
+*.so
+*.dll
+*.a
+*.dylib
+
+# cbindgen output
+fialka_core.h
+
+# Android JNI output
+jniLibs/
+
+# IDE
+.idea/
+*.iml

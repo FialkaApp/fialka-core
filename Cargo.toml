@@ -1,0 +1,44 @@
+[package]
+name = "fialka-core"
+version = "0.1.0"
+edition = "2021"
+description = "Fialka cross-platform cryptographic core — Double Ratchet, PQXDH, AES-256-GCM, ML-KEM-1024, Ed25519"
+license = "GPL-3.0"
+repository = "https://github.com/FialkaApp/fialka-core"
+keywords = ["cryptography", "double-ratchet", "pqxdh", "ml-kem", "ffi"]
+
+[lib]
+name = "fialka_core"
+# cdylib  → .so / .dll  (JNI for Android, P/Invoke for Desktop)
+# staticlib → .a         (iOS future)
+# rlib    → Rust crate  (internal tests)
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+# Classic asymmetric
+ed25519-dalek      = { version = "2.1",  features = ["rand_core", "zeroize"] }
+x25519-dalek       = { version = "2.0",  features = ["static_secrets", "zeroize"] }
+
+# Post-quantum (NIST FIPS 203 / 204)
+ml-kem             = { version = "0.3",  features = ["mlkem1024"] }
+ml-dsa             = { version = "0.3",  features = ["ml-dsa-44"] }
+
+# Symmetric / AEAD
+aes-gcm            = "0.10"
+chacha20poly1305   = "0.10"
+
+# KDF / Hash
+hkdf               = "0.12"
+sha2               = "0.10"
+sha3               = "0.10"
+
+# Utilities
+zeroize            = { version = "1.8", features = ["derive"] }
+rand               = "0.8"
+rand_core          = "0.6"
+base64             = "0.22"
+bs58               = "0.5"
+bip39              = "2.0"
+
+[dev-dependencies]
+hex   = "0.4"
