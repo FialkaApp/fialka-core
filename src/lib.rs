@@ -8,3 +8,7 @@ pub mod identity;
 pub mod protocol;
 pub mod ratchet;
 pub mod ffi;
+
+#[cfg(not(target_os = "android"))]
+#[path = "ffi/desktop.rs"]
+pub mod ffi_desktop;
