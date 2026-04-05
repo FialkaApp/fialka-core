@@ -48,4 +48,8 @@ bip39              = "2.0"
 version  = "0.4"
 optional = false
 
+# JNI bridge — Android only (not compiled for desktop / iOS)
+[target.'cfg(target_os = "android")'.dependencies]
+jni = { version = "0.21", default-features = false }
+
 [dev-dependencies]
