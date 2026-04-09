@@ -44,6 +44,10 @@ base64             = "0.22"
 bs58               = "0.5"
 bip39              = "2.0"
 
+# Monero wallet — explicit dep on curve25519-dalek 4.x (already transitive via ed25519-dalek)
+# Direct declaration ensures we can use Scalar, EdwardsPoint, ED25519_BASEPOINT_TABLE directly.
+curve25519-dalek   = { version = "4", features = ["digest", "zeroize"] }
+
 [dependencies.hex]
 version  = "0.4"
 optional = false

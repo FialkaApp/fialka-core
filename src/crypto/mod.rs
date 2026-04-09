@@ -25,3 +25,4 @@ pub mod mlkem;
 pub mod mldsa;
 pub mod aesgcm;
 pub mod chacha;
+pub mod monero;

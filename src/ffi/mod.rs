@@ -45,6 +45,7 @@ use crate::crypto::{kdf, aesgcm, chacha};
 use crate::crypto::ed25519::{self as ed25519_mod, Ed25519KeyPair};
 use crate::crypto::x25519 as x25519_mod;
 use crate::crypto::{mlkem, mldsa};
+use crate::crypto::monero as xmr;
 use crate::identity::{FialkaIdentity, compute_onion_from_ed25519, derive_account_id};
 use crate::ratchet;
 
@@ -682,5 +683,123 @@ pub extern "system" fn Java_com_fialkaapp_fialka_crypto_FialkaNative_ratchetPqSt
     let pq32   = ok!(env, to32(&ok!(env, get_bytes(&mut env, &pq_ss))));
     let new_root = ratchet::pq_ratchet_step(&root32, &pq32);
     out_bytes(&mut env, new_root.as_ref())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 31. XMR — generate fresh wallet seed
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `FialkaNative.xmrGenerateSeed(): ByteArray` → [32]
+///
+/// Generates 32 bytes of cryptographically secure random entropy.
+/// This is the root of the XMR wallet — INDEPENDENT from the Fialka identity seed.
+/// Store under a separate EncryptedSharedPrefs key (not KEY_ED25519_SEED).
+#[no_mangle]
+pub extern "system" fn Java_com_fialkaapp_fialka_crypto_FialkaNative_xmrGenerateSeed<'l>(
+    mut env: JNIEnv<'l>, _this: JObject<'l>,
+) -> JByteArray<'l> {
+    let seed = xmr::generate_wallet_seed();
+    out_bytes(&mut env, seed.as_ref())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 32. XMR — derive all public keys from seed
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `FialkaNative.xmrDeriveKeys(seed: ByteArray[32]): ByteArray`
+///
+/// Returns: spend_pub(32) || view_pub(32) || view_priv(32) = 96 bytes.
+///
+/// ⚠ spend_priv is derived inside Rust and deliberately NOT returned.
+///   It is zeroized before this function returns.
+#[no_mangle]
+pub extern "system" fn Java_com_fialkaapp_fialka_crypto_FialkaNative_xmrDeriveKeys<'l>(
+    mut env: JNIEnv<'l>, _this: JObject<'l>,
+    seed: JByteArray<'l>,
+) -> JByteArray<'l> {
+    let seed_bytes = ok!(env, get_bytes(&mut env, &seed));
+    let seed32 = ok!(env, to32(&seed_bytes));
+    let (spend_pub, view_pub, view_priv) = xmr::derive_keys_from_seed(&seed32);
+    let mut out = Vec::with_capacity(96);
+    out.extend_from_slice(&spend_pub);
+    out.extend_from_slice(&view_pub);
+    out.extend_from_slice(view_priv.as_ref());
+    out_bytes(&mut env, &out)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 33. XMR — primary address
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `FialkaNative.xmrPrimaryAddress(spendPub: ByteArray[32], viewPub: ByteArray[32]): ByteArray`
+///
+/// Returns UTF-8 bytes of the Monero mainnet primary address (always 95 chars, starts with "4").
+#[no_mangle]
+pub extern "system" fn Java_com_fialkaapp_fialka_crypto_FialkaNative_xmrPrimaryAddress<'l>(
+    mut env: JNIEnv<'l>, _this: JObject<'l>,
+    spend_pub: JByteArray<'l>,
+    view_pub:  JByteArray<'l>,
+) -> JByteArray<'l> {
+    let sp_bytes = ok!(env, get_bytes(&mut env, &spend_pub));
+    let vp_bytes = ok!(env, get_bytes(&mut env, &view_pub));
+    let sp32 = ok!(env, to32(&sp_bytes));
+    let vp32 = ok!(env, to32(&vp_bytes));
+    let addr = xmr::primary_address(&sp32, &vp32);
+    out_bytes(&mut env, addr.as_bytes())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 34. XMR — subaddress at (account, index)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `FialkaNative.xmrSubAddress(spendPub: ByteArray[32], viewPriv: ByteArray[32], account: Int, index: Int): ByteArray`
+///
+/// Returns UTF-8 bytes of a Monero subaddress (always 95 chars, starts with "8").
+/// Does NOT require spend_priv — safe for watch-only contexts.
+#[no_mangle]
+pub extern "system" fn Java_com_fialkaapp_fialka_crypto_FialkaNative_xmrSubAddress<'l>(
+    mut env: JNIEnv<'l>, _this: JObject<'l>,
+    spend_pub: JByteArray<'l>,
+    view_priv: JByteArray<'l>,
+    account:   jint,
+    index:     jint,
+) -> JByteArray<'l> {
+    let sp_bytes = ok!(env, get_bytes(&mut env, &spend_pub));
+    let vp_bytes = ok!(env, get_bytes(&mut env, &view_priv));
+    let sp32 = ok!(env, to32(&sp_bytes));
+    let vp32 = ok!(env, to32(&vp_bytes));
+    let addr = ok!(env,
+        xmr::subaddress(&sp32, &vp32, account as u32, index as u32)
+    );
+    out_bytes(&mut env, addr.as_bytes())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 35. XMR — derive donation subaddress (deterministic per AccountID)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `FialkaNative.xmrDeriveDonationSubaddress(spendPub: ByteArray[32], viewPriv: ByteArray[32], accountIdBytes: ByteArray): ByteArray`
+///
+/// Returns UTF-8 bytes of a deterministic Monero subaddress for this user's AccountID.
+///
+/// Index = first 4 bytes of SHA-256(accountIdBytes) as little-endian u32, account = 0.
+/// `spendPub` and `viewPriv` are the donation wallet's public keys (hardcoded in the app —
+/// they are intentionally public for open-source transparency auditing).
+#[no_mangle]
+pub extern "system" fn Java_com_fialkaapp_fialka_crypto_FialkaNative_xmrDeriveDonationSubaddress<'l>(
+    mut env: JNIEnv<'l>, _this: JObject<'l>,
+    spend_pub:        JByteArray<'l>,
+    view_priv:        JByteArray<'l>,
+    account_id_bytes: JByteArray<'l>,
+) -> JByteArray<'l> {
+    let sp_bytes  = ok!(env, get_bytes(&mut env, &spend_pub));
+    let vp_bytes  = ok!(env, get_bytes(&mut env, &view_priv));
+    let aid_bytes = ok!(env, get_bytes(&mut env, &account_id_bytes));
+    let sp32 = ok!(env, to32(&sp_bytes));
+    let vp32 = ok!(env, to32(&vp_bytes));
+    let addr = ok!(env,
+        xmr::derive_donation_subaddress(&sp32, &vp32, &aid_bytes)
+    );
+    out_bytes(&mut env, addr.as_bytes())
 }
 
