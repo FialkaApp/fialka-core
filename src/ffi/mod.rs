@@ -78,6 +78,13 @@ macro_rules! throw_ret {
     }};
 }
 
+macro_rules! throw_ret_int {
+    ($env:expr, $msg:expr) => {{
+        let _ = $env.throw_new("java/lang/RuntimeException", $msg);
+        return 0;
+    }};
+}
+
 macro_rules! ok {
     ($env:expr, $res:expr) => {
         match $res {
@@ -735,20 +742,23 @@ pub extern "system" fn Java_com_fialkaapp_fialka_crypto_FialkaNative_xmrDeriveKe
 // 33. XMR — primary address
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// `FialkaNative.xmrPrimaryAddress(spendPub: ByteArray[32], viewPub: ByteArray[32]): ByteArray`
+/// `FialkaNative.xmrPrimaryAddress(spendPub: ByteArray[32], viewPub: ByteArray[32], networkType: Int): ByteArray`
 ///
-/// Returns UTF-8 bytes of the Monero mainnet primary address (always 95 chars, starts with "4").
+/// Returns UTF-8 bytes of the Monero primary address (always 95 chars).
+/// networkType: 0=mainnet ("4…"), 1=testnet ("9…"), 2=stagenet ("5…").
 #[no_mangle]
 pub extern "system" fn Java_com_fialkaapp_fialka_crypto_FialkaNative_xmrPrimaryAddress<'l>(
     mut env: JNIEnv<'l>, _this: JObject<'l>,
-    spend_pub: JByteArray<'l>,
-    view_pub:  JByteArray<'l>,
+    spend_pub:    JByteArray<'l>,
+    view_pub:     JByteArray<'l>,
+    network_type: jint,
 ) -> JByteArray<'l> {
     let sp_bytes = ok!(env, get_bytes(&mut env, &spend_pub));
     let vp_bytes = ok!(env, get_bytes(&mut env, &view_pub));
     let sp32 = ok!(env, to32(&sp_bytes));
     let vp32 = ok!(env, to32(&vp_bytes));
-    let addr = xmr::primary_address(&sp32, &vp32);
+    let net = ok!(env, xmr::NetworkType::from_u8(network_type as u8));
+    let addr = xmr::primary_address(&sp32, &vp32, net);
     out_bytes(&mut env, addr.as_bytes())
 }
 
@@ -756,24 +766,27 @@ pub extern "system" fn Java_com_fialkaapp_fialka_crypto_FialkaNative_xmrPrimaryA
 // 34. XMR — subaddress at (account, index)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// `FialkaNative.xmrSubAddress(spendPub: ByteArray[32], viewPriv: ByteArray[32], account: Int, index: Int): ByteArray`
+/// `FialkaNative.xmrSubAddress(spendPub: ByteArray[32], viewPriv: ByteArray[32], account: Int, index: Int, networkType: Int): ByteArray`
 ///
-/// Returns UTF-8 bytes of a Monero subaddress (always 95 chars, starts with "8").
+/// Returns UTF-8 bytes of a Monero subaddress (always 95 chars).
+/// networkType: 0=mainnet ("8…"), 1=testnet, 2=stagenet ("7…").
 /// Does NOT require spend_priv — safe for watch-only contexts.
 #[no_mangle]
 pub extern "system" fn Java_com_fialkaapp_fialka_crypto_FialkaNative_xmrSubAddress<'l>(
     mut env: JNIEnv<'l>, _this: JObject<'l>,
-    spend_pub: JByteArray<'l>,
-    view_priv: JByteArray<'l>,
-    account:   jint,
-    index:     jint,
+    spend_pub:    JByteArray<'l>,
+    view_priv:    JByteArray<'l>,
+    account:      jint,
+    index:        jint,
+    network_type: jint,
 ) -> JByteArray<'l> {
     let sp_bytes = ok!(env, get_bytes(&mut env, &spend_pub));
     let vp_bytes = ok!(env, get_bytes(&mut env, &view_priv));
     let sp32 = ok!(env, to32(&sp_bytes));
     let vp32 = ok!(env, to32(&vp_bytes));
+    let net = ok!(env, xmr::NetworkType::from_u8(network_type as u8));
     let addr = ok!(env,
-        xmr::subaddress(&sp32, &vp32, account as u32, index as u32)
+        xmr::subaddress(&sp32, &vp32, account as u32, index as u32, net)
     );
     out_bytes(&mut env, addr.as_bytes())
 }
@@ -782,7 +795,7 @@ pub extern "system" fn Java_com_fialkaapp_fialka_crypto_FialkaNative_xmrSubAddre
 // 35. XMR — derive donation subaddress (deterministic per AccountID)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// `FialkaNative.xmrDeriveDonationSubaddress(spendPub: ByteArray[32], viewPriv: ByteArray[32], accountIdBytes: ByteArray): ByteArray`
+/// `FialkaNative.xmrDeriveDonationSubaddress(spendPub: ByteArray[32], viewPriv: ByteArray[32], accountIdBytes: ByteArray, networkType: Int): ByteArray`
 ///
 /// Returns UTF-8 bytes of a deterministic Monero subaddress for this user's AccountID.
 ///
@@ -795,15 +808,46 @@ pub extern "system" fn Java_com_fialkaapp_fialka_crypto_FialkaNative_xmrDeriveDo
     spend_pub:        JByteArray<'l>,
     view_priv:        JByteArray<'l>,
     account_id_bytes: JByteArray<'l>,
+    network_type:     jint,
 ) -> JByteArray<'l> {
     let sp_bytes  = ok!(env, get_bytes(&mut env, &spend_pub));
     let vp_bytes  = ok!(env, get_bytes(&mut env, &view_priv));
     let aid_bytes = ok!(env, get_bytes(&mut env, &account_id_bytes));
     let sp32 = ok!(env, to32(&sp_bytes));
     let vp32 = ok!(env, to32(&vp_bytes));
+    let net = ok!(env, xmr::NetworkType::from_u8(network_type as u8));
     let addr = ok!(env,
-        xmr::derive_donation_subaddress(&sp32, &vp32, &aid_bytes)
+        xmr::derive_donation_subaddress(&sp32, &vp32, &aid_bytes, net)
     );
     out_bytes(&mut env, addr.as_bytes())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 36. XMR — validate address
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `FialkaNative.xmrValidateAddress(address: ByteArray, networkType: Int): Int`
+///
+/// Returns: 0 = invalid, 1 = valid standard address, 2 = valid subaddress.
+/// Checks base58 decoding, Keccak-256 checksum, and network prefix.
+#[no_mangle]
+pub extern "system" fn Java_com_fialkaapp_fialka_crypto_FialkaNative_xmrValidateAddress<'l>(
+    mut env: JNIEnv<'l>, _this: JObject<'l>,
+    address:      JByteArray<'l>,
+    network_type: jint,
+) -> jint {
+    let addr_bytes = match get_bytes(&mut env, &address) {
+        Ok(v) => v,
+        Err(e) => throw_ret_int!(env, &format!("{e}")),
+    };
+    let addr_str = match std::str::from_utf8(&addr_bytes) {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+    let net = match xmr::NetworkType::from_u8(network_type as u8) {
+        Ok(n) => n,
+        Err(_) => return 0,
+    };
+    xmr::validate_address(addr_str, net) as jint
 }
 

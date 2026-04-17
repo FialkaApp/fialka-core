@@ -44,11 +44,43 @@ use curve25519_dalek::edwards::{CompressedEdwardsY, EdwardsPoint};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-/// Monero mainnet standard address network prefix (decimal 18).
-const MAINNET_ADDR_PREFIX: u8 = 18;
+/// Network type enum — matches wallet2_api.h: 0=Mainnet, 1=Testnet, 2=Stagenet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum NetworkType {
+    Mainnet  = 0,
+    Testnet  = 1,
+    Stagenet = 2,
+}
 
-/// Monero mainnet subaddress network prefix (decimal 42).
-const MAINNET_SUBADDR_PREFIX: u8 = 42;
+impl NetworkType {
+    pub fn from_u8(v: u8) -> Result<Self, &'static str> {
+        match v {
+            0 => Ok(Self::Mainnet),
+            1 => Ok(Self::Testnet),
+            2 => Ok(Self::Stagenet),
+            _ => Err("xmr: invalid network_type (expected 0, 1, or 2)"),
+        }
+    }
+
+    /// Standard address prefix (prefix for addresses starting with "4" / "5" / "9").
+    pub fn addr_prefix(self) -> u8 {
+        match self {
+            Self::Mainnet  => 18,
+            Self::Testnet  => 53,
+            Self::Stagenet => 24,
+        }
+    }
+
+    /// Subaddress prefix (prefix for addresses starting with "8" / "7" / "B").
+    pub fn subaddr_prefix(self) -> u8 {
+        match self {
+            Self::Mainnet  => 42,
+            Self::Testnet  => 63,
+            Self::Stagenet => 36,
+        }
+    }
+}
 
 /// Base58 alphabet used by Monero (identical to Bitcoin's).
 const BASE58_ALPHABET: &[u8; 58] =
@@ -57,8 +89,14 @@ const BASE58_ALPHABET: &[u8; 58] =
 /// Number of base58 characters required to encode n input bytes (n = 0..=8).
 const ENCODED_BLOCK_SIZES: [usize; 9] = [0, 2, 3, 5, 6, 7, 9, 10, 11];
 
+/// Number of bytes decoded from n base58 characters (n = 0..=11).
+const DECODED_BLOCK_SIZES: [usize; 12] = [0, 0, 1, 2, 0, 3, 4, 5, 0, 6, 7, 8];
+
 /// Input block size (bytes) for Monero's chunked base58.
 const BLOCK_SIZE: usize = 8;
+
+/// Full encoded block size (base58 chars).
+const FULL_ENCODED_BLOCK: usize = 11;
 
 // ── Key generation ────────────────────────────────────────────────────────────
 
@@ -163,14 +201,14 @@ fn build_address(prefix: u8, spend_pub: &[u8; 32], view_pub: &[u8; 32]) -> Strin
 
 // ── Public address API ────────────────────────────────────────────────────────
 
-/// Return the Monero mainnet primary address for `(spend_pub, view_pub)`.
+/// Return the Monero primary address for `(spend_pub, view_pub)` on the given network.
 ///
-/// Starts with `"4"` on mainnet.  Always 95 characters.
-pub fn primary_address(spend_pub: &[u8; 32], view_pub: &[u8; 32]) -> String {
-    build_address(MAINNET_ADDR_PREFIX, spend_pub, view_pub)
+/// Starts with `"4"` on mainnet, `"5"` on stagenet.  Always 95 characters.
+pub fn primary_address(spend_pub: &[u8; 32], view_pub: &[u8; 32], net: NetworkType) -> String {
+    build_address(net.addr_prefix(), spend_pub, view_pub)
 }
 
-/// Derive a Monero subaddress at position `(account, index)`.
+/// Derive a Monero subaddress at position `(account, index)` on the given network.
 ///
 /// Does NOT require `spend_priv` — only `spend_pub` and `view_priv`.
 /// This makes it safe to use with a watch-only setup (donations page).
@@ -183,6 +221,7 @@ pub fn subaddress(
     view_priv_bytes: &[u8; 32],
     account: u32,
     index: u32,
+    net: NetworkType,
 ) -> Result<String, &'static str> {
     // Decompress spend public key to an Edwards point.
     let spend_pub_point = CompressedEdwardsY(*spend_pub_bytes)
@@ -210,7 +249,7 @@ pub fn subaddress(
     let sub_view_pub_point: EdwardsPoint = &*view_scalar * &sub_spend_pub_point;
     let sub_view_pub = sub_view_pub_point.compress().to_bytes();
 
-    Ok(build_address(MAINNET_SUBADDR_PREFIX, &sub_spend_pub, &sub_view_pub))
+    Ok(build_address(net.subaddr_prefix(), &sub_spend_pub, &sub_view_pub))
 }
 
 /// Derive a **deterministic donation subaddress** for a given Fialka `account_id`.
@@ -225,10 +264,105 @@ pub fn derive_donation_subaddress(
     spend_pub: &[u8; 32],
     view_priv: &[u8; 32],
     account_id_bytes: &[u8],
+    net: NetworkType,
 ) -> Result<String, &'static str> {
     let hash: [u8; 32] = Sha256::digest(account_id_bytes).into();
     let index = u32::from_le_bytes([hash[0], hash[1], hash[2], hash[3]]);
-    subaddress(spend_pub, view_priv, 0, index)
+    subaddress(spend_pub, view_priv, 0, index, net)
+}
+
+// ── Address validation ────────────────────────────────────────────────────────
+
+/// Decode a single Monero base58 block (up to 11 chars) back to bytes.
+fn decode_block(encoded: &[u8]) -> Result<Vec<u8>, &'static str> {
+    if encoded.is_empty() || encoded.len() > FULL_ENCODED_BLOCK {
+        return Err("xmr: invalid base58 block length");
+    }
+
+    let out_len = DECODED_BLOCK_SIZES[encoded.len()];
+    if out_len == 0 && encoded.len() != 1 {
+        return Err("xmr: invalid base58 block length");
+    }
+
+    let mut num: u128 = 0;
+    for &ch in encoded {
+        let digit = BASE58_ALPHABET.iter().position(|&c| c == ch)
+            .ok_or("xmr: invalid base58 character")? as u128;
+        num = num * 58 + digit;
+    }
+
+    let mut result = vec![0u8; out_len];
+    for i in (0..out_len).rev() {
+        result[i] = (num & 0xFF) as u8;
+        num >>= 8;
+    }
+
+    if num != 0 {
+        return Err("xmr: base58 block overflow");
+    }
+    Ok(result)
+}
+
+/// Decode Monero chunked base58 back to raw bytes.
+fn monero_base58_decode(encoded: &str) -> Result<Vec<u8>, &'static str> {
+    let enc = encoded.as_bytes();
+    let full_blocks = enc.len() / FULL_ENCODED_BLOCK;
+    let remainder = enc.len() % FULL_ENCODED_BLOCK;
+
+    let mut result = Vec::new();
+
+    for i in 0..full_blocks {
+        let block = &enc[i * FULL_ENCODED_BLOCK..(i + 1) * FULL_ENCODED_BLOCK];
+        result.extend(decode_block(block)?);
+    }
+    if remainder > 0 {
+        let block = &enc[full_blocks * FULL_ENCODED_BLOCK..];
+        result.extend(decode_block(block)?);
+    }
+
+    Ok(result)
+}
+
+/// Validate a Monero address string.
+///
+/// Returns:
+/// - `0` if the address is **invalid** (wrong length, bad base58, bad checksum, wrong prefix)
+/// - `1` if it's a valid **standard** (primary) address for the given network
+/// - `2` if it's a valid **subaddress** for the given network
+///
+/// This is safe to expose via JNI for user-input validation (send screen).
+pub fn validate_address(address: &str, net: NetworkType) -> u8 {
+    // Monero addresses are always exactly 95 base58 characters.
+    if address.len() != 95 {
+        return 0;
+    }
+
+    // Decode base58 → should give 69 bytes: prefix(1) + spend_pub(32) + view_pub(32) + checksum(4)
+    let data = match monero_base58_decode(address) {
+        Ok(d) => d,
+        Err(_) => return 0,
+    };
+
+    if data.len() != 69 {
+        return 0;
+    }
+
+    // Verify Keccak-256 checksum: first 4 bytes of keccak256(prefix || keys)
+    let payload = &data[..65]; // prefix + spend_pub + view_pub
+    let expected_checksum: [u8; 32] = Keccak256::digest(payload).into();
+    if data[65..69] != expected_checksum[..4] {
+        return 0;
+    }
+
+    // Check prefix
+    let prefix = data[0];
+    if prefix == net.addr_prefix() {
+        1 // valid standard address
+    } else if prefix == net.subaddr_prefix() {
+        2 // valid subaddress
+    } else {
+        0 // wrong network
+    }
 }
 
 // ── Unit tests ────────────────────────────────────────────────────────────────
@@ -243,7 +377,7 @@ mod tests {
     #[test]
     fn test_primary_address_length() {
         let (spend_pub, view_pub, _view_priv) = derive_keys_from_seed(&ZERO_SEED);
-        let addr = primary_address(&spend_pub, &view_pub);
+        let addr = primary_address(&spend_pub, &view_pub, NetworkType::Mainnet);
         // Monero mainnet primary address is always 95 chars.
         assert_eq!(addr.len(), 95, "Primary address must be 95 chars, got {}", addr.len());
         assert!(addr.starts_with('4'), "Mainnet address must start with '4'");
@@ -252,7 +386,7 @@ mod tests {
     #[test]
     fn test_subaddress_length() {
         let (spend_pub, _view_pub, view_priv) = derive_keys_from_seed(&ZERO_SEED);
-        let addr = subaddress(&spend_pub, &view_priv, 0, 1).unwrap();
+        let addr = subaddress(&spend_pub, &view_priv, 0, 1, NetworkType::Mainnet).unwrap();
         // Monero subaddress is always 95 chars.
         assert_eq!(addr.len(), 95, "Subaddress must be 95 chars, got {}", addr.len());
         assert!(addr.starts_with('8'), "Mainnet subaddress must start with '8'");
@@ -261,8 +395,8 @@ mod tests {
     #[test]
     fn test_primary_address_differs_from_subaddress() {
         let (spend_pub, view_pub, view_priv) = derive_keys_from_seed(&ZERO_SEED);
-        let primary = primary_address(&spend_pub, &view_pub);
-        let sub     = subaddress(&spend_pub, &view_priv, 0, 1).unwrap();
+        let primary = primary_address(&spend_pub, &view_pub, NetworkType::Mainnet);
+        let sub     = subaddress(&spend_pub, &view_priv, 0, 1, NetworkType::Mainnet).unwrap();
         assert_ne!(primary, sub);
     }
 
@@ -270,17 +404,54 @@ mod tests {
     fn test_donation_subaddress_deterministic() {
         let (spend_pub, _view_pub, view_priv) = derive_keys_from_seed(&ZERO_SEED);
         let account_id = b"FialkaTestAccountId123";
-        let a1 = derive_donation_subaddress(&spend_pub, &view_priv, account_id).unwrap();
-        let a2 = derive_donation_subaddress(&spend_pub, &view_priv, account_id).unwrap();
+        let a1 = derive_donation_subaddress(&spend_pub, &view_priv, account_id, NetworkType::Mainnet).unwrap();
+        let a2 = derive_donation_subaddress(&spend_pub, &view_priv, account_id, NetworkType::Mainnet).unwrap();
         assert_eq!(a1, a2, "Donation subaddress must be deterministic");
     }
 
     #[test]
     fn test_donation_subaddresses_unique_per_user() {
         let (spend_pub, _view_pub, view_priv) = derive_keys_from_seed(&ZERO_SEED);
-        let a1 = derive_donation_subaddress(&spend_pub, &view_priv, b"user-A").unwrap();
-        let a2 = derive_donation_subaddress(&spend_pub, &view_priv, b"user-B").unwrap();
+        let a1 = derive_donation_subaddress(&spend_pub, &view_priv, b"user-A", NetworkType::Mainnet).unwrap();
+        let a2 = derive_donation_subaddress(&spend_pub, &view_priv, b"user-B", NetworkType::Mainnet).unwrap();
         assert_ne!(a1, a2, "Different users must get different donation addresses");
+    }
+
+    #[test]
+    fn test_stagenet_primary_address() {
+        let (spend_pub, view_pub, _view_priv) = derive_keys_from_seed(&ZERO_SEED);
+        let addr = primary_address(&spend_pub, &view_pub, NetworkType::Stagenet);
+        assert_eq!(addr.len(), 95, "Stagenet primary address must be 95 chars");
+        assert!(addr.starts_with('5'), "Stagenet address must start with '5', got '{}'", &addr[..1]);
+    }
+
+    #[test]
+    fn test_stagenet_subaddress() {
+        let (spend_pub, _view_pub, view_priv) = derive_keys_from_seed(&ZERO_SEED);
+        let addr = subaddress(&spend_pub, &view_priv, 0, 1, NetworkType::Stagenet).unwrap();
+        assert_eq!(addr.len(), 95, "Stagenet subaddress must be 95 chars");
+        assert!(addr.starts_with('7'), "Stagenet subaddress must start with '7', got '{}'", &addr[..1]);
+    }
+
+    #[test]
+    fn test_validate_address_mainnet() {
+        let (spend_pub, view_pub, view_priv) = derive_keys_from_seed(&ZERO_SEED);
+        let primary = primary_address(&spend_pub, &view_pub, NetworkType::Mainnet);
+        let sub = subaddress(&spend_pub, &view_priv, 0, 1, NetworkType::Mainnet).unwrap();
+        assert_eq!(validate_address(&primary, NetworkType::Mainnet), 1, "Should be valid standard");
+        assert_eq!(validate_address(&sub, NetworkType::Mainnet), 2, "Should be valid subaddress");
+        assert_eq!(validate_address("notanaddress", NetworkType::Mainnet), 0, "Should be invalid");
+        // Cross-network: mainnet address on stagenet should fail
+        assert_eq!(validate_address(&primary, NetworkType::Stagenet), 0, "Wrong network");
+    }
+
+    #[test]
+    fn test_validate_address_stagenet() {
+        let (spend_pub, view_pub, view_priv) = derive_keys_from_seed(&ZERO_SEED);
+        let primary = primary_address(&spend_pub, &view_pub, NetworkType::Stagenet);
+        let sub = subaddress(&spend_pub, &view_priv, 0, 1, NetworkType::Stagenet).unwrap();
+        assert_eq!(validate_address(&primary, NetworkType::Stagenet), 1);
+        assert_eq!(validate_address(&sub, NetworkType::Stagenet), 2);
     }
 
     #[test]
