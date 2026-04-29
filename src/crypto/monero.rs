@@ -117,9 +117,10 @@ pub fn generate_wallet_seed() -> Zeroizing<[u8; 32]> {
 /// Returns `(spend_pub[32], view_pub[32], view_priv[32])`.
 /// The **spend_priv** scalar is computed internally and deliberately **not** returned.
 pub fn derive_keys_from_seed(seed: &[u8; 32]) -> ([u8; 32], [u8; 32], Zeroizing<[u8; 32]>) {
-    // spend_scalar = sc_reduce32( keccak256(seed) )
-    let spend_hash: [u8; 32] = Keccak256::digest(&seed[..]).into();
-    let spend_scalar = Zeroizing::new(Scalar::from_bytes_mod_order(spend_hash));
+    // spend_scalar = sc_reduce32(seed)
+    // In Monero, the mnemonic encodes the raw seed bytes which ARE the private spend key.
+    // No keccak hash — the seed is used directly as the scalar (reduced mod l).
+    let spend_scalar = Zeroizing::new(Scalar::from_bytes_mod_order(*seed));
 
     // view_scalar = sc_reduce32( keccak256(spend_scalar.as_bytes()) )
     let view_hash: [u8; 32] = Keccak256::digest(spend_scalar.as_bytes()).into();
@@ -267,7 +268,11 @@ pub fn derive_donation_subaddress(
     net: NetworkType,
 ) -> Result<String, &'static str> {
     let hash: [u8; 32] = Sha256::digest(account_id_bytes).into();
-    let index = u32::from_le_bytes([hash[0], hash[1], hash[2], hash[3]]);
+    // Clamp to 50 000 so the donation wallet only needs a subaddress lookahead of 50 000.
+    // Standard Monero wallets can handle this range; the default 200-subaddress lookahead
+    // would miss most users, so rebuild / rescan the donation wallet with --subaddress-lookahead 0:50000.
+    let raw = u32::from_le_bytes([hash[0], hash[1], hash[2], hash[3]]);
+    let index = (raw % 50_000) + 1; // +1: index 0 is the primary address, keep it separate
     subaddress(spend_pub, view_priv, 0, index, net)
 }
 
